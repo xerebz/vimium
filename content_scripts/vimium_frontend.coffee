@@ -131,12 +131,7 @@ initializePreDomReady = ->
 # This is called once the background page has told us that Vimium should be enabled for the current URL.
 #
 initializeWhenEnabled = ->
-  document.addEventListener("keydown", onKeydown, true)
-  document.addEventListener("keypress", onKeypress, true)
-  document.addEventListener("keyup", onKeyup, true)
-  document.addEventListener("focus", onFocusCapturePhase, true)
-  document.addEventListener("blur", onBlurCapturePhase, true)
-  document.addEventListener("DOMActivate", onDOMActivate, true)
+  handlerStack.enabled = true
   enterInsertModeIfElementIsFocused()
 
 #
@@ -144,12 +139,7 @@ initializeWhenEnabled = ->
 # This is called if the current page's url is blacklisted using the popup UI.
 #
 disableVimium = ->
-  document.removeEventListener("keydown", onKeydown, true)
-  document.removeEventListener("keypress", onKeypress, true)
-  document.removeEventListener("keyup", onKeyup, true)
-  document.removeEventListener("focus", onFocusCapturePhase, true)
-  document.removeEventListener("blur", onBlurCapturePhase, true)
-  document.removeEventListener("DOMActivate", onDOMActivate, true)
+  handlerStack.enabled = false
   isEnabledForUrl = false
 
 #
@@ -189,8 +179,6 @@ registerFrameIfSizeAvailable = (is_top) ->
 enterInsertModeIfElementIsFocused = ->
   if (document.activeElement && isEditable(document.activeElement) && !findMode)
     enterInsertModeWithoutShowingIndicator(document.activeElement)
-
-onDOMActivate = (event) -> handlerStack.bubbleEvent 'DOMActivate', event
 
 executePageCommand = (request) ->
   return unless frameId == request.frameId
@@ -317,118 +305,129 @@ extend window,
 
       false
 
-#
-# Sends everything except i & ESC to the handler in background_page. i & ESC are special because they control
-# insert mode which is local state to the page. The key will be are either a single ascii letter or a
-# key-modifier pair, e.g. <c-a> for control a.
-#
-# Note that some keys will only register keydown events and not keystroke events, e.g. ESC.
-#
-onKeypress = (event) ->
-  return unless handlerStack.bubbleEvent('keypress', event)
+handlerStack.push
+  #
+  # Sends everything except i & ESC to the handler in background_page. i & ESC are special because they control
+  # insert mode which is local state to the page. The key will be are either a single ascii letter or a
+  # key-modifier pair, e.g. <c-a> for control a.
+  #
+  # Note that some keys will only register keydown events and not keystroke events, e.g. ESC.
+  #
+  keypress: (event) ->
+    keyChar = ""
 
-  keyChar = ""
+    # Ignore modifier keys by themselves.
+    if (event.keyCode > 31)
+      keyChar = String.fromCharCode(event.charCode)
 
-  # Ignore modifier keys by themselves.
-  if (event.keyCode > 31)
-    keyChar = String.fromCharCode(event.charCode)
+      # Enter insert mode when the user enables the native find interface.
+      if (keyChar == "f" && KeyboardUtils.isPrimaryModifierKey(event))
+        enterInsertModeWithoutShowingIndicator()
+        return true
 
-    # Enter insert mode when the user enables the native find interface.
-    if (keyChar == "f" && KeyboardUtils.isPrimaryModifierKey(event))
-      enterInsertModeWithoutShowingIndicator()
-      return
+      if (keyChar)
+        if (findMode)
+          handleKeyCharForFindMode(keyChar)
+          return false
+        else if (!isInsertMode() && !findMode)
+          console.log "posting ", keyChar
+          keyPort.postMessage({ keyChar:keyChar, frameId:frameId })
+          if (currentCompletionKeys.indexOf(keyChar) != -1)
+            return false
 
-    if (keyChar)
-      if (findMode)
-        handleKeyCharForFindMode(keyChar)
-        DomUtils.suppressEvent(event)
-      else if (!isInsertMode() && !findMode)
+    return true
+
+  keydown: (event) ->
+    rv = true
+    keyChar = ""
+
+    # handle special keys, and normal input keys with modifiers being pressed. don't handle shiftKey alone (to
+    # avoid / being interpreted as ?
+    if (((event.metaKey || event.ctrlKey || event.altKey) && event.keyCode > 31) ||
+        event.keyIdentifier.slice(0, 2) != "U+")
+      keyChar = KeyboardUtils.getKeyChar(event)
+      # Again, ignore just modifiers. Maybe this should replace the keyCode>31 condition.
+      if (keyChar != "")
+        modifiers = []
+
+        if (event.shiftKey)
+          keyChar = keyChar.toUpperCase()
+        if (event.metaKey)
+          modifiers.push("m")
+        if (event.ctrlKey)
+          modifiers.push("c")
+        if (event.altKey)
+          modifiers.push("a")
+
+        for i of modifiers
+          keyChar = modifiers[i] + "-" + keyChar
+
+        if (modifiers.length > 0 || keyChar.length > 1)
+          keyChar = "<" + keyChar + ">"
+
+    if (isInsertMode() && KeyboardUtils.isEscape(event))
+      # Note that we can't programmatically blur out of Flash embeds from Javascript.
+      if (!isEmbed(event.srcElement))
+        # Remove focus so the user can't just get himself back into insert mode by typing in the same input
+        # box.
+        if (isEditable(event.srcElement))
+          event.srcElement.blur()
+        exitInsertMode()
+        rv = false
+
+    else if (findMode)
+      if (KeyboardUtils.isEscape(event))
+        handleEscapeForFindMode()
+        rv = false
+
+      else if (event.keyCode == keyCodes.backspace || event.keyCode == keyCodes.deleteKey)
+        handleDeleteForFindMode()
+        rv = false
+
+      else if (event.keyCode == keyCodes.enter)
+        handleEnterForFindMode()
+        rv = false
+
+      else if (!modifiers)
+        # avoid calling preventDefault(), as it would stop keypress from firing
+        event.stopPropagation()
+
+    else if (isShowingHelpDialog && KeyboardUtils.isEscape(event))
+      hideHelpDialog()
+
+    else if (!isInsertMode() && !findMode)
+      if (keyChar)
         if (currentCompletionKeys.indexOf(keyChar) != -1)
-          DomUtils.suppressEvent(event)
+          rv = false
 
         keyPort.postMessage({ keyChar:keyChar, frameId:frameId })
 
-onKeydown = (event) ->
-  return unless handlerStack.bubbleEvent('keydown', event)
+      else if (KeyboardUtils.isEscape(event))
+        keyPort.postMessage({ keyChar:"<ESC>", frameId:frameId })
 
-  keyChar = ""
-
-  # handle special keys, and normal input keys with modifiers being pressed. don't handle shiftKey alone (to
-  # avoid / being interpreted as ?
-  if (((event.metaKey || event.ctrlKey || event.altKey) && event.keyCode > 31) ||
-      event.keyIdentifier.slice(0, 2) != "U+")
-    keyChar = KeyboardUtils.getKeyChar(event)
-    # Again, ignore just modifiers. Maybe this should replace the keyCode>31 condition.
-    if (keyChar != "")
-      modifiers = []
-
-      if (event.shiftKey)
-        keyChar = keyChar.toUpperCase()
-      if (event.metaKey)
-        modifiers.push("m")
-      if (event.ctrlKey)
-        modifiers.push("c")
-      if (event.altKey)
-        modifiers.push("a")
-
-      for i of modifiers
-        keyChar = modifiers[i] + "-" + keyChar
-
-      if (modifiers.length > 0 || keyChar.length > 1)
-        keyChar = "<" + keyChar + ">"
-
-  if (isInsertMode() && KeyboardUtils.isEscape(event))
-    # Note that we can't programmatically blur out of Flash embeds from Javascript.
-    if (!isEmbed(event.srcElement))
-      # Remove focus so the user can't just get himself back into insert mode by typing in the same input
-      # box.
-      if (isEditable(event.srcElement))
-        event.srcElement.blur()
-      exitInsertMode()
-      DomUtils.suppressEvent(event)
-
-  else if (findMode)
-    if (KeyboardUtils.isEscape(event))
-      handleEscapeForFindMode()
-      DomUtils.suppressEvent(event)
-
-    else if (event.keyCode == keyCodes.backspace || event.keyCode == keyCodes.deleteKey)
-      handleDeleteForFindMode()
-      DomUtils.suppressEvent(event)
-
-    else if (event.keyCode == keyCodes.enter)
-      handleEnterForFindMode()
-      DomUtils.suppressEvent(event)
-
-    else if (!modifiers)
+    # Added to prevent propagating this event to other listeners if it's one that'll trigger a Vimium command.
+    # The goal is to avoid the scenario where Google Instant Search uses every keydown event to dump us
+    # back into the search box. As a side effect, this should also prevent overriding by other sites.
+    #
+    # Subject to internationalization issues since we're using keyIdentifier instead of charCode (in keypress).
+    #
+    # TODO(ilya): Revisit this. Not sure it's the absolute best approach.
+    if (keyChar == "" && !isInsertMode() &&
+       (currentCompletionKeys.indexOf(KeyboardUtils.getKeyChar(event)) != -1 ||
+        isValidFirstKey(KeyboardUtils.getKeyChar(event))))
       event.stopPropagation()
 
-  else if (isShowingHelpDialog && KeyboardUtils.isEscape(event))
-    hideHelpDialog()
+    rv
 
-  else if (!isInsertMode() && !findMode)
-    if (keyChar)
-      if (currentCompletionKeys.indexOf(keyChar) != -1)
-        DomUtils.suppressEvent(event)
+  focus: (event) ->
+    if (isFocusable(event.target) && !findMode)
+      enterInsertModeWithoutShowingIndicator(event.target)
+    true
 
-      keyPort.postMessage({ keyChar:keyChar, frameId:frameId })
-
-    else if (KeyboardUtils.isEscape(event))
-      keyPort.postMessage({ keyChar:"<ESC>", frameId:frameId })
-
-  # Added to prevent propagating this event to other listeners if it's one that'll trigger a Vimium command.
-  # The goal is to avoid the scenario where Google Instant Search uses every keydown event to dump us
-  # back into the search box. As a side effect, this should also prevent overriding by other sites.
-  #
-  # Subject to internationalization issues since we're using keyIdentifier instead of charCode (in keypress).
-  #
-  # TOOD(ilya): Revisit this. Not sure it's the absolute best approach.
-  if (keyChar == "" && !isInsertMode() &&
-     (currentCompletionKeys.indexOf(KeyboardUtils.getKeyChar(event)) != -1 ||
-      isValidFirstKey(KeyboardUtils.getKeyChar(event))))
-    event.stopPropagation()
-
-onKeyup = (event) -> return unless handlerStack.bubbleEvent('keyup', event)
+  blur: (event) ->
+    if (isFocusable(event.target))
+      exitInsertMode(event.target)
+    true
 
 checkIfEnabledForUrl = ->
   url = window.location.toString()
@@ -452,14 +451,6 @@ refreshCompletionKeys = (response) ->
 
 isValidFirstKey = (keyChar) ->
   validFirstKeys[keyChar] || /[1-9]/.test(keyChar)
-
-onFocusCapturePhase = (event) ->
-  if (isFocusable(event.target) && !findMode)
-    enterInsertModeWithoutShowingIndicator(event.target)
-
-onBlurCapturePhase = (event) ->
-  if (isFocusable(event.target))
-    exitInsertMode(event.target)
 
 #
 # Returns true if the element is focusable. This includes embeds like Flash, which steal the keybaord focus.

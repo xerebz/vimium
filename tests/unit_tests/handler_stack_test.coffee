@@ -5,7 +5,10 @@ context "handlerStack",
   setup ->
     stub global, "DomUtils", {}
     stub DomUtils, "suppressEvent", ->
+    stub global, "document", {}
+    stub document, "addEventListener", ->
     @handlerStack = new HandlerStack
+    @handlerStack.enabled = true
     @handler1Called = false
     @handler2Called = false
 
