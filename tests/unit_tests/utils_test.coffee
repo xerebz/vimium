@@ -41,3 +41,10 @@ context "convertToUrl",
   should "convert non-URL terms into search queries", ->
     assert.equal "http://www.google.com/search?q=google", Utils.convertToUrl("google")
     assert.equal "http://www.google.com/search?q=go%20ogle.com", Utils.convertToUrl("go ogle.com")
+
+context "compare versions",
+  should "compare correctly", ->
+    assert.equal 0, Utils.compareVersions("1.40.1", "1.40.1")
+    assert.equal -1, Utils.compareVersions("1.40.1", "1.40.2")
+    assert.equal -1, Utils.compareVersions("1.40.1", "1.41")
+    assert.equal 1, Utils.compareVersions("1.41", "1.40")
