@@ -27,7 +27,7 @@ Marks =
   # vim's [A-Z] for global marks and [a-z] for local marks.  However, it also admits other non-Latin
   # characters.  The exceptions are "`" and "'", which are always considered local marks.
   isGlobalMark: (event, keyChar) ->
-    true
+    keyChar not in @previousPositionRegisters
 
   activateCreateMode: ->
     @mode = new Mode
